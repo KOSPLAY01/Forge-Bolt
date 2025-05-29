@@ -159,7 +159,7 @@ app.post('/auth/forgot-password', async (req, res) => {
     const resetToken = jwt.sign(
       { userId: user.id },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '15m' }
     );
 
     const resetUrl = `http://localhost:5173/reset-password?token=${resetToken}`;
@@ -168,7 +168,7 @@ app.post('/auth/forgot-password', async (req, res) => {
       from: `"Forge & Bolt" <${process.env.EMAIL_USER}>`,
       to: email,
       subject: 'Password Reset Request',
-      html: `<p>Click below to reset your password:</p><a href="${resetUrl}">${resetUrl}</a><p>Link expires in 1 hour.</p>`,
+      html: `<p>Click below to reset your password:</p><a href="${resetUrl}">${resetUrl}</a><p>Link expires in 15 minutes.</p>`,
     });
 
     // No need to store token or expiry in DB now
