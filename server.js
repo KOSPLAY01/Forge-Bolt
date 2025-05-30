@@ -35,7 +35,16 @@ const transporter = nodemailer.createTransport({
 });
 
 const generateToken = (user) =>
-  jwt.sign({ id: user.id, email: user.email }, process.env.JWT_SECRET, { expiresIn: '7d' });
+  jwt.sign(
+    {
+      id: user.id,
+      email: user.email,
+      username: user.username, 
+      role: user.role          
+    },
+    process.env.JWT_SECRET,
+    { expiresIn: '7d' }
+  );
 
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
@@ -63,6 +72,9 @@ const uploadImage = async (file) => {
 app.get('/', (req, res) => {
   res.send('Welcome to Forge & Bolt');
 });
+
+
+// User Management 
 
 // Register
 app.post('/auth/register', upload.single('image'), async (req, res) => {
@@ -214,6 +226,125 @@ app.post('/auth/reset-password', async (req, res) => {
   } catch (err) {
     console.error('Reset password error:', err);
     res.status(400).json({ error: 'Invalid or expired token' });
+  }
+});
+
+
+
+//  Product Management 
+
+app.get('/products', async (req, res) => {
+  try {
+    const { category, brand, price } = req.query;
+
+    let query = supabase.from('products').select('*');
+
+    if (category) {
+      query = query.eq('category', category);
+    }
+
+    if (brand) {
+      query = query.eq('brand', brand);
+    }
+
+    if (price) {
+      query = query.lte('price', parseFloat(price));
+    }
+
+    const { data, error } = await query;
+
+    if (error) return res.status(400).json({ error: error.message });
+
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+
+app.get('/products/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const { data, error } = await supabase.from('products').select('*').eq('id', id).single();
+    if (error || !data) return res.status(404).json({ error: 'Product not found' });
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/products', authenticateToken, upload.single('image'), async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Only admins can add products' });
+  }
+
+  try {
+    const { name, description, price, category, brand, stock_count, } = req.body;
+    const imageUrl = await uploadImage(req.file);
+
+    const { data, error } = await supabase
+      .from('products')
+      .insert([{ name, description, price, image_url: imageUrl, category, brand, stock_count }])
+      .select()
+      .single();
+
+    if (error) return res.status(400).json({ error: error.message });
+
+    res.status(201).json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/products/:id', authenticateToken, upload.single('image'), async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Only admins can update products' });
+  }
+
+  const { id } = req.params;
+  try {
+    const { name, description, price, category, brand, stock_count } = req.body;
+    const updates = { name, description, price, category, brand, stock_count };
+
+    if (req.file) {
+      updates.image_url = await uploadImage(req.file);
+    }
+
+    const { data, error } = await supabase
+      .from('products')
+      .update(updates)
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error || !data) return res.status(404).json({ error: 'Product not found' });
+
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/products/:id', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Only admins can delete products' });
+  }
+
+  const { id } = req.params;
+  try {
+    const { data, error } = await supabase
+      .from('products')
+      .delete()
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error || !data) return res.status(404).json({ error: 'Product not found' });
+
+    res.json({ message: 'Product deleted successfully' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
