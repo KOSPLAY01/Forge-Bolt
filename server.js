@@ -348,5 +348,173 @@ app.delete('/products/:id', authenticateToken, async (req, res) => {
   }
 });
 
+
+//  Shopping Cart 
+
+
+// Helper function to update grand total for user
+async function updateGrandTotal(userId) {
+  const { data: cartItems, error } = await supabase
+    .from('carts')
+    .select('quantity, products(price)')
+    .eq('user_id', userId)
+    .neq('quantity', 0)
+    .order('id');
+
+  if (error) throw new Error(error.message);
+
+  const grandTotal = cartItems.reduce((sum, item) => {
+    return sum + (item.products?.price || 0) * item.quantity;
+  }, 0);
+
+  const { error: upsertError } = await supabase
+    .from('cart_totals')
+    .upsert({ user_id: userId, grand_total: grandTotal });
+
+  if (upsertError) throw new Error(upsertError.message);
+
+  return grandTotal;
+}
+
+app.post('/cart', authenticateToken, async (req, res) => {
+  const { productId, quantity } = req.body;
+  if (!productId || !quantity) return res.status(400).json({ error: 'Product ID and quantity are required' });
+
+  try {
+    const { data: product, error: productError } = await supabase
+      .from('products')
+      .select('*')
+      .eq('id', productId)
+      .single();
+
+    if (productError || !product) return res.status(404).json({ error: 'Product not found' });
+
+    if (quantity > product.stock_count) {
+      return res.status(400).json({ error: `Only ${product.stock_count} items in stock` });
+    }
+
+    const { data: cartItem, error } = await supabase
+      .from('carts')
+      .insert([{ user_id: req.user.id, product_id: productId, quantity }])
+      .select('*, products(*)')
+      .single();
+
+    if (error) return res.status(400).json({ error: error.message });
+
+    const total_price = product.price * quantity;
+
+    // Update grand total in cart_totals
+    const grand_total = await updateGrandTotal(req.user.id);
+
+    res.status(201).json({
+      ...cartItem,
+      total_price,
+      grand_total
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/cart', authenticateToken, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('carts')
+      .select('*, products(*)')
+      .eq('user_id', req.user.id);
+
+    if (error) return res.status(400).json({ error: error.message });
+
+    const enrichedCart = data.map(item => ({
+      ...item,
+      total_price: item.products.price * item.quantity
+    }));
+
+    const { data: totalData } = await supabase
+      .from('cart_totals')
+      .select('grand_total')
+      .eq('user_id', req.user.id)
+      .single();
+
+    res.json({ items: enrichedCart, grand_total: totalData?.grand_total || 0 });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/cart/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const { quantity } = req.body;
+
+  if (quantity === undefined) return res.status(400).json({ error: 'Quantity is required' });
+
+  try {
+    const { data: existingCartItem, error: fetchError } = await supabase
+      .from('carts')
+      .select('*, products(*)')
+      .eq('id', id)
+      .single();
+
+    if (fetchError || !existingCartItem) return res.status(404).json({ error: 'Cart item not found' });
+
+    const product = existingCartItem.products;
+    if (quantity > product.stock_count) {
+      return res.status(400).json({ error: `Only ${product.stock_count} items in stock` });
+    }
+
+    const { data: updatedItem, error } = await supabase
+      .from('carts')
+      .update({ quantity })
+      .eq('id', id)
+      .select('*, products(*)')
+      .single();
+
+    if (error) return res.status(400).json({ error: error.message });
+
+    const total_price = updatedItem.products.price * updatedItem.quantity;
+
+    // Update grand total
+    const grand_total = await updateGrandTotal(req.user.id);
+
+    res.json({
+      ...updatedItem,
+      total_price,
+      grand_total
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/cart/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    // Get user_id before delete to update grand total later
+    const { data: cartItem, error: fetchError } = await supabase
+      .from('carts')
+      .select('user_id')
+      .eq('id', id)
+      .single();
+
+    if (fetchError || !cartItem) return res.status(404).json({ error: 'Cart item not found' });
+
+    const { error } = await supabase
+      .from('carts')
+      .delete()
+      .eq('id', id);
+
+    if (error) return res.status(400).json({ error: error.message });
+
+    // Update grand total
+    const grand_total = await updateGrandTotal(cartItem.user_id);
+
+    res.json({ message: 'Cart item deleted successfully', grand_total });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
