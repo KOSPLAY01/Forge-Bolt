@@ -13,8 +13,11 @@ import nodemailer from 'nodemailer';
 dotenv.config();
 
 const app = express();
-app.use(cors());
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use(cors());
+
+
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
 
@@ -76,22 +79,27 @@ app.get('/', (req, res) => {
 
 // User Management 
 
-// Register
-app.post('/register', async (req, res) => {
+//  REGISTER 
+app.post('/register', upload.single('image'), async (req, res) => {
   const { email, password, name } = req.body;
   if (!email || !password || !name) return res.status(400).json({ error: 'All fields are required' });
 
   try {
     const hashedPassword = await bcrypt.hash(password, 10);
+    let imageUrl = null;
+
+    if (req.file) {
+      imageUrl = await uploadImage(req.file);
+    }
+
     const { data: user, error: userError } = await supabase
       .from('users')
-      .insert([{ email, password: hashedPassword, name }])
+      .insert([{ email, password: hashedPassword, name, profile_image_url: imageUrl }])
       .select()
       .single();
 
     if (userError) return res.status(400).json({ error: userError.message });
 
-    // Create an empty cart for the user
     await supabase.from('carts').insert([{ user_id: user.id, grand_total: 0 }]);
 
     res.status(201).json({ message: 'User registered successfully' });
@@ -100,13 +108,12 @@ app.post('/register', async (req, res) => {
   }
 });
 
-
-// Login
+// LOGIN 
 app.post('/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
-    const { data: user, error } = await supabase.from('users').select('*').eq('email', email).single();
 
+    const { data: user, error } = await supabase.from('users').select('*').eq('email', email).single();
     if (error || !user) return res.status(400).json({ error: 'Invalid email or password' });
 
     const valid = await bcrypt.compare(password, user.password);
@@ -119,22 +126,31 @@ app.post('/auth/login', async (req, res) => {
   }
 });
 
-// Profile
+// GET PROFILE
 app.get('/auth/profile', authenticateToken, async (req, res) => {
   try {
-    const { data: user, error } = await supabase.from('users').select('*').eq('id', req.user.id).single();
+    const { data: user, error } = await supabase
+      .from('users')
+      .select('*')
+      .eq('id', req.user.id)
+      .single();
+
     if (error || !user) return res.status(404).json({ error: 'User not found' });
+
     res.json(user);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// Update Profile
+// UPDATE PROFILE 
 app.put('/auth/profile', authenticateToken, upload.single('image'), async (req, res) => {
   try {
-    const { username, email } = req.body;
-    const updates = { username, email };
+    const { name, email } = req.body;
+    const updates = {};
+
+    if (name) updates.name = name;
+    if (email) updates.email = email;
 
     if (req.file) {
       const imageUrl = await uploadImage(req.file);
@@ -155,6 +171,7 @@ app.put('/auth/profile', authenticateToken, upload.single('image'), async (req, 
     res.status(500).json({ error: err.message });
   }
 });
+
 
 // Forgot Password
 app.post('/auth/forgot-password', async (req, res) => {
@@ -363,17 +380,40 @@ app.delete('/products/:id', authenticateToken, async (req, res) => {
 });
 
 
+// Cart Management
 
+// Helper functions
+async function getOrCreateCart(userId) {
+  const { data: cart, error } = await supabase
+    .from('carts')
+    .select('*')
+    .eq('user_id', userId)
+    .single();
 
+  if (cart) return cart;
 
-// Helper function to update grand total for user
+  const { data: newCart, error: insertError } = await supabase
+    .from('carts')
+    .insert({ user_id: userId })
+    .select()
+    .single();
+
+  if (insertError) throw new Error(insertError.message);
+  return newCart;
+}
 async function updateGrandTotal(userId) {
+  const { data: cart } = await supabase
+    .from('carts')
+    .select('id')
+    .eq('user_id', userId)
+    .single();
+
+  if (!cart) return 0;
+
   const { data: cartItems, error } = await supabase
     .from('cart_items')
     .select('quantity, products(price)')
-    .eq('user_id', userId)
-    .neq('quantity', 0)
-    .order('id');
+    .eq('cart_id', cart.id);
 
   if (error) throw new Error(error.message);
 
@@ -381,22 +421,23 @@ async function updateGrandTotal(userId) {
     return sum + (item.products?.price || 0) * item.quantity;
   }, 0);
 
-  const { error: upsertError } = await supabase
+  const { error: totalError } = await supabase
     .from('cart_totals')
     .upsert({ user_id: userId, grand_total: grandTotal });
 
-  if (upsertError) throw new Error(upsertError.message);
-
+  if (totalError) throw new Error(totalError.message);
   return grandTotal;
 }
 
-//  Shopping Cart 
+
 app.get('/cart', authenticateToken, async (req, res) => {
   try {
+    const cart = await getOrCreateCart(req.user.id);
+
     const { data: items, error } = await supabase
       .from('cart_items')
       .select('*, products(*)')
-      .eq('user_id', req.user.id);
+      .eq('cart_id', cart.id);
 
     if (error) return res.status(400).json({ error: error.message });
 
@@ -426,6 +467,8 @@ app.post('/cart', authenticateToken, async (req, res) => {
   if (!productId || !quantity) return res.status(400).json({ error: 'Product ID and quantity are required' });
 
   try {
+    const cart = await getOrCreateCart(req.user.id);
+
     const { data: product, error: productError } = await supabase
       .from('products')
       .select('*')
@@ -433,13 +476,14 @@ app.post('/cart', authenticateToken, async (req, res) => {
       .single();
 
     if (productError || !product) return res.status(404).json({ error: 'Product not found' });
+
     if (quantity > product.stock_count) {
       return res.status(400).json({ error: `Only ${product.stock_count} items in stock` });
     }
 
     const { data: cartItem, error } = await supabase
       .from('cart_items')
-      .insert([{ user_id: req.user.id, product_id: productId, quantity }])
+      .insert([{ cart_id: cart.id, product_id: productId, quantity }])
       .select('*, products(*)')
       .single();
 
@@ -457,17 +501,20 @@ app.post('/cart', authenticateToken, async (req, res) => {
   }
 });
 
+
 app.put('/cart/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
   const { quantity } = req.body;
   if (!quantity) return res.status(400).json({ error: 'Quantity is required' });
 
   try {
+    const cart = await getOrCreateCart(req.user.id);
+
     const { data: existingItem, error: fetchError } = await supabase
       .from('cart_items')
       .select('*, products(*)')
       .eq('id', id)
-      .eq('user_id', req.user.id)
+      .eq('cart_id', cart.id)
       .single();
 
     if (fetchError || !existingItem) return res.status(404).json({ error: 'Cart item not found' });
@@ -501,11 +548,13 @@ app.delete('/cart/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
 
   try {
+    const cart = await getOrCreateCart(req.user.id);
+
     const { data: deletedItem, error } = await supabase
       .from('cart_items')
       .delete()
       .eq('id', id)
-      .eq('user_id', req.user.id)
+      .eq('cart_id', cart.id)
       .select()
       .single();
 
@@ -519,6 +568,125 @@ app.delete('/cart/:id', authenticateToken, async (req, res) => {
   }
 });
 
+// Order Management 
+app.post('/orders', authenticateToken, async (req, res) => {
+  try {
+    const cart = await getOrCreateCart(req.user.id);
+
+    const { data: cartItems, error: itemsError } = await supabase
+      .from('cart_items')
+      .select('*, products(price)')
+      .eq('cart_id', cart.id);
+
+    if (itemsError || !cartItems.length) {
+      return res.status(400).json({ error: 'Cart is empty' });
+    }
+
+    // Compute total amount
+    let totalAmount = 0;
+    const orderItems = cartItems.map(item => {
+      const price = parseFloat(item.products.price);
+      const quantity = item.quantity;
+      const subtotal = price * quantity;
+      totalAmount += subtotal;
+
+      return {
+        product_id: item.product_id,
+        quantity,
+        price_each: price,
+        subtotal
+      };
+    });
+
+    // Insert order
+    const { data: order, error: orderError } = await supabase
+      .from('orders')
+      .insert([{ user_id: req.user.id, total_amount: totalAmount }])
+      .select()
+      .single();
+
+    if (orderError) return res.status(400).json({ error: orderError.message });
+
+    // Insert each item
+    const itemInsertions = orderItems.map(item =>
+      supabase.from('order_items').insert({
+        order_id: order.id,
+        product_id: item.product_id,
+        quantity: item.quantity,
+        price_each: item.price_each
+        // subtotal is auto-generated in schema if using generated column
+      })
+    );
+    await Promise.all(itemInsertions);
+
+    // Clear cart
+    await supabase.from('cart_items').delete().eq('cart_id', cart.id);
+
+    res.status(201).json({ message: 'Order placed successfully', order });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/orders', authenticateToken, async (req, res) => {
+  try {
+    const { data: orders, error } = await supabase
+      .from('orders')
+      .select('*, order_items(*, products(*))')
+      .eq('user_id', req.user.id)
+      .order('created_at', { ascending: false });
+
+    if (error) return res.status(400).json({ error: error.message });
+
+    res.json(orders);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/orders/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const { data: order, error } = await supabase
+      .from('orders')
+      .select('*, order_items(*, products(*))')
+      .eq('id', id)
+      .eq('user_id', req.user.id)
+      .single();
+
+    if (error || !order) return res.status(404).json({ error: 'Order not found' });
+
+    res.json(order);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/orders/:id/status', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const { status } = req.body;
+
+  if (!status) return res.status(400).json({ error: 'Status is required' });
+
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Only admins can update order status' });
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from('orders')
+      .update({ status })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error || !data) return res.status(404).json({ error: 'Order not found' });
+
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
