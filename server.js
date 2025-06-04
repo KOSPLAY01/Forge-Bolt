@@ -8,12 +8,20 @@ import { v2 as cloudinary } from 'cloudinary';
 import dotenv from 'dotenv';
 import fs from 'fs';
 import crypto from 'crypto';
+import fetch from 'node-fetch';
+import axios from 'axios';
 import nodemailer from 'nodemailer';
 
 dotenv.config();
 
 const app = express();
-app.use(express.json());
+app.use((req, res, next) => {
+  if (req.originalUrl === '/payments/webhook') {
+    express.raw({ type: 'application/json' })(req, res, next);
+  } else {
+    express.json()(req, res, next);
+  }
+});
 app.use(express.urlencoded({ extended: true }));
 app.use(cors());
 
@@ -390,6 +398,7 @@ async function getOrCreateCart(userId) {
     .eq('user_id', userId)
     .single();
 
+  if (error && !cart) throw new Error(error.message);
   if (cart) return cart;
 
   const { data: newCart, error: insertError } = await supabase
@@ -401,6 +410,7 @@ async function getOrCreateCart(userId) {
   if (insertError) throw new Error(insertError.message);
   return newCart;
 }
+
 async function updateGrandTotal(userId) {
   const { data: cart } = await supabase
     .from('carts')
@@ -573,60 +583,67 @@ app.post('/orders', authenticateToken, async (req, res) => {
   try {
     const cart = await getOrCreateCart(req.user.id);
 
+    // Get cart items with product details
     const { data: cartItems, error: itemsError } = await supabase
       .from('cart_items')
-      .select('*, products(price)')
+      .select('quantity, products(*)')
       .eq('cart_id', cart.id);
 
     if (itemsError || !cartItems.length) {
       return res.status(400).json({ error: 'Cart is empty' });
     }
 
-    // Compute total amount
-    let totalAmount = 0;
-    const orderItems = cartItems.map(item => {
-      const price = parseFloat(item.products.price);
-      const quantity = item.quantity;
-      const subtotal = price * quantity;
-      totalAmount += subtotal;
+    // Calculate total
+    const totalAmount = cartItems.reduce((sum, item) => {
+      return sum + item.quantity * item.products.price;
+    }, 0);
 
-      return {
-        product_id: item.product_id,
-        quantity,
-        price_each: price,
-        subtotal
-      };
-    });
-
-    // Insert order
+    // Create order with pending status
     const { data: order, error: orderError } = await supabase
       .from('orders')
-      .insert([{ user_id: req.user.id, total_amount: totalAmount }])
+      .insert({
+        user_id: req.user.id,
+        total_amount: totalAmount,
+        status: 'pending',
+        created_at: new Date().toISOString(),
+      })
       .select()
       .single();
 
-    if (orderError) return res.status(400).json({ error: orderError.message });
+    if (orderError) {
+      return res.status(500).json({ error: orderError.message });
+    }
 
-    // Insert each item
-    const itemInsertions = orderItems.map(item =>
-      supabase.from('order_items').insert({
-        order_id: order.id,
-        product_id: item.product_id,
-        quantity: item.quantity,
-        price_each: item.price_each
-        // subtotal is auto-generated in schema if using generated column
-      })
-    );
-    await Promise.all(itemInsertions);
+    // Insert order_items linked to this order
+    const orderItemsData = cartItems.map(item => ({
+      order_id: order.id,
+      product_id: item.products.id,
+      quantity: item.quantity,
+      price_at_order: item.products.price, // Store price at purchase time
+    }));
 
-    // Clear cart
-    await supabase.from('cart_items').delete().eq('cart_id', cart.id);
+    const { error: orderItemsError } = await supabase
+      .from('order_items')
+      .insert(orderItemsData);
 
-    res.status(201).json({ message: 'Order placed successfully', order });
+    if (orderItemsError) {
+      return res.status(500).json({ error: orderItemsError.message });
+    }
+
+    // Return order info to frontend, including order ID for payment metadata
+    res.status(201).json({
+      order_id: order.id,
+      total_amount: totalAmount,
+      status: order.status,
+      email: req.user.email,
+    });
+
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
+
+
 
 app.get('/orders', authenticateToken, async (req, res) => {
   try {
@@ -687,6 +704,211 @@ app.put('/orders/:id/status', authenticateToken, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+
+// PAYMENT MANAGEMENT
+
+// PAYMENT INITIATION
+app.post('/payments/initiate', authenticateToken, async (req, res) => {
+  try {
+    const { amount, email, order_id } = req.body;
+    if (!amount || !email || !order_id) {
+      return res.status(400).json({ error: 'Amount, email, and order_id are required' });
+    }
+
+    const response = await axios.post(
+      'https://api.paystack.co/transaction/initialize',
+      {
+        email,
+        amount: amount * 100,
+        callback_url: 'https://your-frontend-domain.com/payment-success',
+        metadata: { order_id },  // pass order_id here
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    res.status(200).json(response.data.data);
+  } catch (err) {
+    res.status(500).json({ error: err.response?.data?.message || err.message });
+  }
+});
+
+// PAYMENT WEBHOOK
+app.post('/payments/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+  try {
+    const signature = req.headers['x-paystack-signature'];
+
+    // Verify webhook signature
+    const hash = crypto
+      .createHmac('sha512', process.env.PAYSTACK_SECRET_KEY)
+      .update(req.body)
+      .digest('hex');
+
+    if (hash !== signature) {
+      console.warn('Invalid Paystack webhook signature');
+      return res.status(401).send('Invalid signature');
+    }
+
+    const event = JSON.parse(req.body.toString());
+    const data = event.data;
+    const email = data.customer.email;
+
+    // Lookup user by email
+    const { data: userData, error: userError } = await supabase
+      .from('users')
+      .select('id, email')
+      .eq('email', email)
+      .single();
+
+    if (userError || !userData) {
+      console.warn(`User not found for email: ${email}`);
+      return res.status(200).send('User not found');
+    }
+    const user_id = userData.id;
+
+    // Extract order_id from payment metadata
+    const order_id = data.metadata?.order_id;
+    if (!order_id) {
+      console.warn('No order_id in payment metadata');
+      return res.status(400).send('Order ID missing');
+    }
+
+    // Setup nodemailer transporter (you can move this outside the handler for efficiency)
+    const transporter = nodemailer.createTransport({
+      service: 'gmail',
+      auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
+    });
+
+    if (event.event === 'charge.success') {
+      const amount = data.amount / 100;
+
+      // Update order status to 'paid' and record payment reference
+      const { data: updatedOrder, error: updateError } = await supabase
+        .from('orders')
+        .update({
+          status: 'paid',
+          paid_at: new Date().toISOString(),
+          payment_reference: data.reference,
+        })
+        .eq('id', order_id)
+        .eq('user_id', user_id)
+        .select()
+        .single();
+
+      if (updateError || !updatedOrder) {
+        console.warn(`Order update failed for order_id: ${order_id}`);
+        return res.status(400).send('Order update failed');
+      }
+
+      // Insert payment reference record
+      await supabase.from('payment_references').insert({
+        user_id,
+        order_id,
+        reference: data.reference,
+        amount,
+        channel: data.channel,
+        currency: data.currency,
+        status: data.status,
+        paid_at: data.paid_at,
+      });
+
+      res.sendStatus(200); // respond early to Paystack
+
+      // Send success email asynchronously
+      const mailOptions = {
+        from: `"Forge & Bolt" <${process.env.EMAIL_USER}>`,
+        to: email,
+        subject: 'Your Order Payment Was Successful',
+        html: `
+          <div style="font-family: Arial, sans-serif; color: #333">
+            <h2 style="color: #4CAF50;">✅ Payment Confirmed</h2>
+            <p>Hi there,</p>
+            <p>We've successfully received your payment of <strong>₦${amount}</strong>.</p>
+            <h3>Order Summary</h3>
+            <ul>
+              <li><strong>Order ID:</strong> ${order_id}</li>
+              <li><strong>Payment Reference:</strong> ${data.reference}</li>
+              <li><strong>Channel:</strong> ${data.channel}</li>
+              <li><strong>Status:</strong> ${data.status}</li>
+              <li><strong>Date:</strong> ${new Date(data.paid_at).toLocaleString()}</li>
+            </ul>
+            <p>Thank you for shopping with <strong>Forge & Bolt</strong>!</p>
+          </div>
+        `,
+      };
+
+      transporter.sendMail(mailOptions).catch(err =>
+        console.error('Error sending confirmation email:', err)
+      );
+
+    } else if (event.event === 'charge.failed') {
+      const amount = data.amount / 100;
+
+      // Update order status to 'failed'
+      await supabase
+        .from('orders')
+        .update({ status: 'failed' })
+        .eq('id', order_id)
+        .eq('user_id', user_id);
+
+      // Insert payment reference record
+      await supabase.from('payment_references').insert({
+        user_id,
+        order_id,
+        reference: data.reference,
+        amount,
+        channel: data.channel,
+        currency: data.currency,
+        status: data.status,
+        paid_at: data.paid_at,
+      });
+
+      res.sendStatus(200); // respond early to Paystack
+
+      // Send failure email asynchronously
+      const mailOptions = {
+        from: `"Forge & Bolt" <${process.env.EMAIL_USER}>`,
+        to: email,
+        subject: 'Payment Failed - Please Try Again',
+        html: `
+          <div style="font-family: Arial, sans-serif; color: #333">
+            <h2 style="color: #d9534f;">❌ Payment Failed</h2>
+            <p>Hi there,</p>
+            <p>Unfortunately, your payment of <strong>₦${amount}</strong> was not successful.</p>
+            <p>Please try again or contact support if you need assistance.</p>
+            <h3>Payment Details</h3>
+            <ul>
+              <li><strong>Order ID:</strong> ${order_id}</li>
+              <li><strong>Payment Reference:</strong> ${data.reference}</li>
+              <li><strong>Channel:</strong> ${data.channel}</li>
+              <li><strong>Status:</strong> ${data.status}</li>
+              <li><strong>Date:</strong> ${new Date(data.paid_at).toLocaleString()}</li>
+            </ul>
+            <p>Thank you for choosing <strong>Forge & Bolt</strong>.</p>
+          </div>
+        `,
+      };
+
+      transporter.sendMail(mailOptions).catch(err =>
+        console.error('Error sending failure email:', err)
+      );
+
+    } else {
+      // Acknowledge other events
+      res.sendStatus(200);
+    }
+  } catch (err) {
+    console.error('Webhook handler error:', err);
+    res.status(500).send('Webhook processing failed');
+  }
+});
+
+
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
