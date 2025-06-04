@@ -396,71 +396,73 @@ async function getOrCreateCart(userId) {
     .from('carts')
     .select('*')
     .eq('user_id', userId)
-    .single();
+    .maybeSingle(); // ✅ prevents the "multiple/no rows" error
 
-  if (error && !cart) throw new Error(error.message);
+  if (error) throw new Error(error.message);
+
   if (cart) return cart;
 
   const { data: newCart, error: insertError } = await supabase
     .from('carts')
     .insert({ user_id: userId })
     .select()
-    .single();
+    .single(); // still okay here since we just inserted one
 
   if (insertError) throw new Error(insertError.message);
   return newCart;
 }
 
 async function updateGrandTotal(userId) {
-  const { data: cart } = await supabase
-    .from('carts')
-    .select('id')
-    .eq('user_id', userId)
-    .single();
+  try {
+    const cart = await getOrCreateCart(userId);
+    const { data: items, error } = await supabase
+      .from('cart_items')
+      .select('quantity, products(price)')
+      .eq('cart_id', cart.id);
 
-  if (!cart) return 0;
+    if (error) throw error;
 
-  const { data: cartItems, error } = await supabase
-    .from('cart_items')
-    .select('quantity, products(price)')
-    .eq('cart_id', cart.id);
+    const grandTotal = items.reduce((sum, item) => {
+      return sum + item.quantity * item.products.price;
+    }, 0);
 
-  if (error) throw new Error(error.message);
+    await supabase
+      .from('carts')
+      .update({ grand_total: grandTotal })
+      .eq('id', cart.id);
 
-  const grandTotal = cartItems.reduce((sum, item) => {
-    return sum + (item.products?.price || 0) * item.quantity;
-  }, 0);
-
-  const { error: totalError } = await supabase
-    .from('cart_totals')
-    .upsert({ user_id: userId, grand_total: grandTotal });
-
-  if (totalError) throw new Error(totalError.message);
-  return grandTotal;
+    return grandTotal;
+  } catch (err) {
+    console.error('Failed to update grand total:', err);
+    return 0;
+  }
 }
+
 
 
 app.get('/cart', authenticateToken, async (req, res) => {
   try {
     const cart = await getOrCreateCart(req.user.id);
 
-    const { data: items, error } = await supabase
+    const { data: items, error: itemsError } = await supabase
       .from('cart_items')
       .select('*, products(*)')
       .eq('cart_id', cart.id);
 
-    if (error) return res.status(400).json({ error: error.message });
+    if (itemsError) return res.status(400).json({ error: itemsError.message });
 
     const enriched = items.map(item => ({
       ...item,
       total_price: item.products.price * item.quantity
     }));
 
-    const { data: totalData } = await supabase
+    const { data: totalData, error: totalError } = await supabase
       .from('cart_totals')
       .select('grand_total')
       .eq('user_id', req.user.id)
-      .single();
+      .maybeSingle();
+
+    if (totalError) return res.status(400).json({ error: totalError.message });
 
     res.json({
       items: enriched,
@@ -470,6 +472,7 @@ app.get('/cart', authenticateToken, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
 
 
 app.post('/cart', authenticateToken, async (req, res) => {
@@ -515,32 +518,37 @@ app.post('/cart', authenticateToken, async (req, res) => {
 app.put('/cart/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
   const { quantity } = req.body;
+
   if (!quantity) return res.status(400).json({ error: 'Quantity is required' });
 
   try {
     const cart = await getOrCreateCart(req.user.id);
 
+    // Disambiguated join
     const { data: existingItem, error: fetchError } = await supabase
       .from('cart_items')
-      .select('*, products(*)')
+      .select('*, products:product_id(*)')
       .eq('id', id)
       .eq('cart_id', cart.id)
-      .single();
+      .maybeSingle();
 
-    if (fetchError || !existingItem) return res.status(404).json({ error: 'Cart item not found' });
+    if (fetchError) return res.status(400).json({ error: fetchError.message });
+    if (!existingItem) return res.status(404).json({ error: 'Cart item not found' });
 
     if (quantity > existingItem.products.stock_count) {
       return res.status(400).json({ error: `Only ${existingItem.products.stock_count} items in stock` });
     }
 
-    const { data: updatedItem, error } = await supabase
+    // Update the cart item with the new quantity
+    const { data: updatedItem, error: updateError } = await supabase
       .from('cart_items')
       .update({ quantity })
       .eq('id', id)
-      .select('*, products(*)')
+      .eq('cart_id', cart.id)
+      .select('*, products:product_id(*)')
       .single();
 
-    if (error) return res.status(400).json({ error: error.message });
+    if (updateError) return res.status(400).json({ error: updateError.message });
 
     const grand_total = await updateGrandTotal(req.user.id);
 
@@ -553,6 +561,7 @@ app.put('/cart/:id', authenticateToken, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
 
 app.delete('/cart/:id', authenticateToken, async (req, res) => {
   const { id } = req.params;
