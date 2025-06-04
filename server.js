@@ -917,6 +917,67 @@ app.post('/payments/webhook', express.raw({ type: 'application/json' }), async (
   }
 });
 
+// Admin Function
+
+// GET /admin/users - get all users (admin only)
+app.get('/admin/users', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Only admins can access users list' });
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from('users')
+      .select('id, email, profile_image_url, name, role, created_at'); // exclude sensitive fields
+
+    if (error) throw error;
+
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /admin/orders - get all orders (admin only)
+app.get('/admin/orders', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Only admins can access orders list' });
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from('orders')
+      .select('*');
+
+    if (error) throw error;
+
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /admin/products/low-stock - get products with low stock (admin only)
+app.get('/admin/products/low-stock', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Only admins can access low stock products' });
+  }
+
+  try {
+    const lowStockThreshold = 5; // adjust threshold here
+
+    const { data, error } = await supabase
+      .from('products')
+      .select('*')
+      .lt('stock_count', lowStockThreshold);
+
+    if (error) throw error;
+
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 
 const PORT = process.env.PORT || 3000;
