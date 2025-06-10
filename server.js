@@ -478,7 +478,6 @@ app.get('/cart', authenticateToken, async (req, res) => {
 });
 
 
-
 app.post('/cart', authenticateToken, async (req, res) => {
   const { productId, quantity } = req.body;
   if (!productId || !quantity) return res.status(400).json({ error: 'Product ID and quantity are required' });
@@ -829,6 +828,27 @@ app.post('/payments/webhook', express.raw({ type: 'application/json' }), async (
         status: data.status,
         paid_at: data.paid_at,
       });
+
+      // Decrease product stock counts after successful payment
+      const { data: orderItems, error: orderItemsError } = await supabase
+        .from('order_items')
+        .select('product_id, quantity')
+        .eq('order_id', order_id);
+
+      if (orderItemsError) {
+        console.error('Error fetching order items for stock update:', orderItemsError);
+      } else if (orderItems && orderItems.length > 0) {
+        for (const item of orderItems) {
+          const { product_id, quantity } = item;
+          const { error: stockError } = await supabase
+            .from('products')
+            .update({ stock_count: supabase.rpc('decrement', { x: quantity }) })
+            .eq('id', product_id);
+          if (stockError) {
+            console.error(`Error updating stock for product ${product_id}:`, stockError);
+          }
+        }
+      }
 
       res.sendStatus(200); // respond early to Paystack
 
