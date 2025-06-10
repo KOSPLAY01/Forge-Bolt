@@ -110,7 +110,7 @@ app.post('/register', upload.single('image'), async (req, res) => {
 
     await supabase.from('carts').insert([{ user_id: user.id, grand_total: 0 }]);
 
-    res.status(201).json({ message: 'User registered successfully' });
+    res.status(201).json({ message: 'User registered successfully' }, { token: generateToken(user), user });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
