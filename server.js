@@ -89,7 +89,7 @@ app.get('/', (req, res) => {
 
 //  REGISTER 
 app.post('/register', upload.single('image'), async (req, res) => {
-  const { email, password, name } = req.body;
+  const { email, password, name, role='customer' } = req.body;
   if (!email || !password || !name) return res.status(400).json({ error: 'All fields are required' });
 
   try {
@@ -102,7 +102,7 @@ app.post('/register', upload.single('image'), async (req, res) => {
 
     const { data: user, error: userError } = await supabase
       .from('users')
-      .insert([{ email, password: hashedPassword, name, profile_image_url: imageUrl }])
+      .insert([{ email, password: hashedPassword, name, profile_image_url: imageUrl, role }])
       .select()
       .single();
 
