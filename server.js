@@ -50,7 +50,7 @@ const generateToken = (user) =>
     {
       id: user.id,
       email: user.email,
-      username: user.username, 
+      username: user.name, 
       role: user.role          
     },
     process.env.JWT_SECRET,
