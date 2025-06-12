@@ -206,7 +206,7 @@ app.post('/auth/forgot-password', async (req, res) => {
       { expiresIn: '15m' }
     );
 
-    const resetUrl = `http://localhost:5173/reset-password?token=${resetToken}`;
+    const resetUrl = `https://forge-bolt-neon.vercel.app/reset-password?token=${resetToken}`;
 
     await transporter.sendMail({
       from: `"Forge & Bolt" <${process.env.EMAIL_USER}>`,
