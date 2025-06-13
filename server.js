@@ -773,8 +773,15 @@ app.post('/payments/webhook', express.raw({ type: 'application/json' }), async (
     const event = JSON.parse(req.body.toString());
     const data = event.data;
     const email = data.customer.email;
+    const order_id = data.metadata?.order_id;
+    const amount = data.amount / 100;
 
-    // Lookup user by email
+    if (!order_id) {
+      console.warn('Missing order_id in metadata');
+      return res.status(400).send('Missing order_id');
+    }
+
+    // Fetch user by email
     const { data: userData, error: userError } = await supabase
       .from('users')
       .select('id, email')
@@ -785,25 +792,17 @@ app.post('/payments/webhook', express.raw({ type: 'application/json' }), async (
       console.warn(`User not found for email: ${email}`);
       return res.status(200).send('User not found');
     }
+
     const user_id = userData.id;
 
-    // Extract order_id from payment metadata
-    const order_id = data.metadata?.order_id;
-    if (!order_id) {
-      console.warn('No order_id in payment metadata');
-      return res.status(400).send('Order ID missing');
-    }
-
-    // Setup nodemailer transporter (you can move this outside the handler for efficiency)
+    // Nodemailer transporter
     const transporter = nodemailer.createTransport({
       service: 'gmail',
       auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
     });
 
     if (event.event === 'charge.success') {
-      const amount = data.amount / 100;
-
-      // Update order status to 'paid' and record payment reference
+      // Update order to 'paid'
       const { data: updatedOrder, error: updateError } = await supabase
         .from('orders')
         .update({
@@ -821,7 +820,13 @@ app.post('/payments/webhook', express.raw({ type: 'application/json' }), async (
         return res.status(400).send('Order update failed');
       }
 
-      // Insert payment reference record
+      // Clear cart items
+      await supabase.from('cart_items').delete().eq('user_id', user_id);
+
+      // Reset cart total
+      await supabase.from('cart_totals').update({ total_amount: 0 }).eq('user_id', user_id);
+
+      // Insert payment record
       await supabase.from('payment_references').insert({
         user_id,
         order_id,
@@ -833,30 +838,23 @@ app.post('/payments/webhook', express.raw({ type: 'application/json' }), async (
         paid_at: data.paid_at,
       });
 
-      // Decrease product stock counts after successful payment
-      const { data: orderItems, error: orderItemsError } = await supabase
+      // Update stock counts
+      const { data: orderItems } = await supabase
         .from('order_items')
         .select('product_id, quantity')
         .eq('order_id', order_id);
 
-      if (orderItemsError) {
-        console.error('Error fetching order items for stock update:', orderItemsError);
-      } else if (orderItems && orderItems.length > 0) {
-        for (const item of orderItems) {
-          const { product_id, quantity } = item;
-          const { error: stockError } = await supabase
-            .from('products')
-            .update({ stock_count: supabase.rpc('decrement', { x: quantity }) })
-            .eq('id', product_id);
-          if (stockError) {
-            console.error(`Error updating stock for product ${product_id}:`, stockError);
-          }
-        }
+      for (const item of orderItems || []) {
+        const { product_id, quantity } = item;
+        await supabase
+          .from('products')
+          .update({ stock_count: supabase.rpc('decrement', { x: quantity }) })
+          .eq('id', product_id);
       }
 
-      res.sendStatus(200); // respond early to Paystack
+      res.sendStatus(200); // Respond early to Paystack
 
-      // Send success email asynchronously
+      // Send confirmation email
       const mailOptions = {
         from: `"Forge & Bolt" <${process.env.EMAIL_USER}>`,
         to: email,
@@ -880,20 +878,18 @@ app.post('/payments/webhook', express.raw({ type: 'application/json' }), async (
       };
 
       transporter.sendMail(mailOptions).catch(err =>
-        console.error('Error sending confirmation email:', err)
+        console.error('Error sending success email:', err)
       );
 
     } else if (event.event === 'charge.failed') {
-      const amount = data.amount / 100;
-
-      // Update order status to 'failed'
+      // Mark order as failed
       await supabase
         .from('orders')
         .update({ status: 'failed' })
         .eq('id', order_id)
         .eq('user_id', user_id);
 
-      // Insert payment reference record
+      // Log failed payment
       await supabase.from('payment_references').insert({
         user_id,
         order_id,
@@ -905,9 +901,9 @@ app.post('/payments/webhook', express.raw({ type: 'application/json' }), async (
         paid_at: data.paid_at,
       });
 
-      res.sendStatus(200); // respond early to Paystack
+      res.sendStatus(200); // Respond to Paystack
 
-      // Send failure email asynchronously
+      // Send failure email
       const mailOptions = {
         from: `"Forge & Bolt" <${process.env.EMAIL_USER}>`,
         to: email,
@@ -916,8 +912,8 @@ app.post('/payments/webhook', express.raw({ type: 'application/json' }), async (
           <div style="font-family: Arial, sans-serif; color: #333">
             <h2 style="color: #d9534f;">❌ Payment Failed</h2>
             <p>Hi there,</p>
-            <p>Unfortunately, your payment of <strong>₦${amount}</strong> was not successful.</p>
-            <p>Please try again or contact support if you need assistance.</p>
+            <p>Your payment of <strong>₦${amount}</strong> was not successful.</p>
+            <p>Please try again or contact support if you need help.</p>
             <h3>Payment Details</h3>
             <ul>
               <li><strong>Order ID:</strong> ${order_id}</li>
@@ -936,11 +932,11 @@ app.post('/payments/webhook', express.raw({ type: 'application/json' }), async (
       );
 
     } else {
-      // Acknowledge other events
+      // Acknowledge other event types
       res.sendStatus(200);
     }
   } catch (err) {
-    console.error('Webhook handler error:', err);
+    console.error('Webhook error:', err);
     res.status(500).send('Webhook processing failed');
   }
 });
