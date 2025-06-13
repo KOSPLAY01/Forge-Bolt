@@ -737,7 +737,7 @@ app.post('/payments/initiate', authenticateToken, async (req, res) => {
       {
         email,
         amount: amount * 100,
-        callback_url: 'https://your-frontend-domain.com/payment-success',
+        callback_url: 'https://forge-bolt-neon.vercel.app/my-order', 
         metadata: { order_id },  // pass order_id here
       },
       {
