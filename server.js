@@ -274,7 +274,11 @@ app.get('/products', async (req, res) => {
     const from = (pageNum - 1) * limitNum;
     const to = from + limitNum - 1;
 
-    let query = supabase.from('products').select('*', { count: 'exact' }).range(from, to);
+    let query = supabase
+      .from('products')
+      .select('*', { count: 'exact' })
+      .order('created_at', { ascending: false }) 
+      .range(from, to);
 
     if (category) {
       query = query.eq('category', category);
