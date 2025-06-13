@@ -267,7 +267,7 @@ app.post('/auth/reset-password', async (req, res) => {
 
 app.get('/products', async (req, res) => {
   try {
-    const { category, brand, price, page = 1, limit = 20 } = req.query;
+    const { category, brand, price, page = 1, limit = 18 } = req.query;
 
     const pageNum = parseInt(page);
     const limitNum = parseInt(limit);
