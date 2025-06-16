@@ -380,6 +380,14 @@ app.delete('/products/:id', authenticateToken, async (req, res) => {
 
   const { id } = req.params;
   try {
+
+    // Remove product from cart_items
+    await supabase.from('cart_items').delete().eq('product_id', id);
+    // Remove product from order_items
+    await supabase.from('order_items').delete().eq('product_id', id);
+    // Optionally, remove from other related tables if needed
+
+    // Delete the product itself
     const { data, error } = await supabase
       .from('products')
       .delete()
@@ -389,7 +397,7 @@ app.delete('/products/:id', authenticateToken, async (req, res) => {
 
     if (error || !data) return res.status(404).json({ error: 'Product not found' });
 
-    res.json({ message: 'Product deleted successfully' });
+    res.json({ message: 'Product deleted successfully and removed from all related records.' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
