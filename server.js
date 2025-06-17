@@ -863,10 +863,17 @@ app.post('/payments/webhook', express.raw({ type: 'application/json' }), async (
         return res.status(400).send('Order update failed');
       }
 
-      // Clear cart items
-      await supabase.from('cart_items').delete().eq('user_id', user_id);
+      // Clear cart items for this user's cart only
+      const { data: userCart, error: cartError } = await supabase
+        .from('carts')
+        .select('id')
+        .eq('user_id', user_id)
+        .single();
+      if (userCart && userCart.id) {
+        await supabase.from('cart_items').delete().eq('cart_id', userCart.id);
+      }
       // Reset cart total
-      await supabase.from('cart_totals').update({ total_amount: 0 }).eq('user_id', user_id);
+      await supabase.from('cart_totals').update({ grand_total: 0 }).eq('user_id', user_id);
       // Insert payment record
       await supabase.from('payment_references').insert({
         user_id,
