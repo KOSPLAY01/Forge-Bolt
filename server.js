@@ -836,6 +836,19 @@ app.post('/payments/webhook', express.raw({ type: 'application/json' }), async (
       // Update order to 'paid'
       // Debug log for order update
       console.log('Updating order', { order_id, user_id });
+      // Check if order exists before updating
+      const { data: orderCheck, error: orderCheckError } = await supabase
+        .from('orders')
+        .select('*')
+        .eq('id', Number(order_id))
+        .eq('user_id', user_id)
+        .single();
+      console.log('Order check result:', orderCheck, orderCheckError);
+      if (!orderCheck || orderCheckError) {
+        console.warn(`Order not found for update: id=${order_id}, user_id=${user_id}`);
+        return res.status(404).send('Order not found');
+      }
+      // Update order to 'paid' (force id to integer)
       const { data: updatedOrder, error: updateError } = await supabase
         .from('orders')
         .update({
@@ -843,12 +856,12 @@ app.post('/payments/webhook', express.raw({ type: 'application/json' }), async (
           paid_at: new Date().toISOString(),
           payment_reference: data.reference,
         })
-        .eq('id', order_id)
+        .eq('id', Number(order_id))
         .eq('user_id', user_id)
         .select()
         .single();
       if (updateError || !updatedOrder) {
-        console.warn(`Order update failed for order_id: ${order_id}`);
+        console.warn(`Order update failed for order_id: ${order_id}`, updateError);
         return res.status(400).send('Order update failed');
       }
 
