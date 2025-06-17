@@ -853,7 +853,6 @@ app.post('/payments/webhook', express.raw({ type: 'application/json' }), async (
         .from('orders')
         .update({
           status: 'paid',
-          payment_reference: data.reference,
         })
         .eq('id', Number(order_id))
         .eq('user_id', user_id)
