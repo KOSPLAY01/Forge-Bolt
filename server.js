@@ -779,31 +779,45 @@ app.post('/payments/initiate', authenticateToken, async (req, res) => {
   }
 });
 
-// PAYMENT WEBHOOK
+// PAYMENT WEBHOOK (Best Practice)
 app.post('/payments/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+  // Log every webhook hit for debugging
+  console.log('Paystack webhook endpoint hit at', new Date().toISOString());
   try {
     const signature = req.headers['x-paystack-signature'];
+    if (!signature) {
+      console.warn('No Paystack signature header');
+      return res.status(400).send('Missing signature');
+    }
 
     // Verify webhook signature
     const hash = crypto
       .createHmac('sha512', process.env.PAYSTACK_SECRET_KEY)
       .update(req.body)
       .digest('hex');
-
     if (hash !== signature) {
       console.warn('Invalid Paystack webhook signature');
       return res.status(401).send('Invalid signature');
     }
 
-    const event = JSON.parse(req.body.toString());
+    // Parse event
+    let event;
+    try {
+      event = JSON.parse(req.body.toString());
+    } catch (parseErr) {
+      console.error('Webhook JSON parse error:', parseErr);
+      return res.status(400).send('Invalid JSON');
+    }
     const data = event.data;
-    const email = data.customer.email;
-    const order_id = data.metadata?.order_id;
-    const amount = data.amount / 100;
+    if (!data) return res.status(400).send('No data in webhook');
 
-    if (!order_id) {
-      console.warn('Missing order_id in metadata');
-      return res.status(400).send('Missing order_id');
+    const email = data.customer?.email;
+    const order_id = data.metadata?.order_id;
+    const amount = data.amount ? data.amount / 100 : 0;
+
+    if (!order_id || !email) {
+      console.warn('Missing order_id or email in webhook data');
+      return res.status(400).send('Missing order_id or email');
     }
 
     // Fetch user by email
@@ -812,19 +826,11 @@ app.post('/payments/webhook', express.raw({ type: 'application/json' }), async (
       .select('id, email')
       .eq('email', email)
       .single();
-
     if (userError || !userData) {
       console.warn(`User not found for email: ${email}`);
       return res.status(200).send('User not found');
     }
-
     const user_id = userData.id;
-
-    // Nodemailer transporter
-    const transporter = nodemailer.createTransport({
-      service: 'gmail',
-      auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
-    });
 
     if (event.event === 'charge.success') {
       // Update order to 'paid'
@@ -839,7 +845,6 @@ app.post('/payments/webhook', express.raw({ type: 'application/json' }), async (
         .eq('user_id', user_id)
         .select()
         .single();
-
       if (updateError || !updatedOrder) {
         console.warn(`Order update failed for order_id: ${order_id}`);
         return res.status(400).send('Order update failed');
@@ -847,10 +852,8 @@ app.post('/payments/webhook', express.raw({ type: 'application/json' }), async (
 
       // Clear cart items
       await supabase.from('cart_items').delete().eq('user_id', user_id);
-
       // Reset cart total
       await supabase.from('cart_totals').update({ total_amount: 0 }).eq('user_id', user_id);
-
       // Insert payment record
       await supabase.from('payment_references').insert({
         user_id,
@@ -862,13 +865,11 @@ app.post('/payments/webhook', express.raw({ type: 'application/json' }), async (
         status: data.status,
         paid_at: data.paid_at,
       });
-
       // Update stock counts
       const { data: orderItems } = await supabase
         .from('order_items')
         .select('product_id, quantity')
         .eq('order_id', order_id);
-
       for (const item of orderItems || []) {
         const { product_id, quantity } = item;
         await supabase
@@ -876,11 +877,9 @@ app.post('/payments/webhook', express.raw({ type: 'application/json' }), async (
           .update({ stock_count: supabase.rpc('decrement', { x: quantity }) })
           .eq('id', product_id);
       }
-
       res.sendStatus(200); // Respond early to Paystack
-
-      // Send confirmation email
-      const mailOptions = {
+      // Send confirmation email (async, don't await)
+      transporter.sendMail({
         from: `"Forge & Bolt" <${process.env.EMAIL_USER}>`,
         to: email,
         subject: 'Your Order Payment Was Successful',
@@ -900,12 +899,7 @@ app.post('/payments/webhook', express.raw({ type: 'application/json' }), async (
             <p>Thank you for shopping with <strong>Forge & Bolt</strong>!</p>
           </div>
         `,
-      };
-
-      transporter.sendMail(mailOptions).catch(err =>
-        console.error('Error sending success email:', err)
-      );
-
+      }).catch(err => console.error('Error sending success email:', err));
     } else if (event.event === 'charge.failed') {
       // Mark order as failed
       await supabase
@@ -913,7 +907,6 @@ app.post('/payments/webhook', express.raw({ type: 'application/json' }), async (
         .update({ status: 'failed' })
         .eq('id', order_id)
         .eq('user_id', user_id);
-
       // Log failed payment
       await supabase.from('payment_references').insert({
         user_id,
@@ -925,11 +918,9 @@ app.post('/payments/webhook', express.raw({ type: 'application/json' }), async (
         status: data.status,
         paid_at: data.paid_at,
       });
-
-      res.sendStatus(200); // Respond to Paystack
-
-      // Send failure email
-      const mailOptions = {
+      res.sendStatus(200);
+      // Send failure email (async)
+      transporter.sendMail({
         from: `"Forge & Bolt" <${process.env.EMAIL_USER}>`,
         to: email,
         subject: 'Payment Failed - Please Try Again',
@@ -950,12 +941,7 @@ app.post('/payments/webhook', express.raw({ type: 'application/json' }), async (
             <p>Thank you for choosing <strong>Forge & Bolt</strong>.</p>
           </div>
         `,
-      };
-
-      transporter.sendMail(mailOptions).catch(err =>
-        console.error('Error sending failure email:', err)
-      );
-
+      }).catch(err => console.error('Error sending failure email:', err));
     } else {
       // Acknowledge other event types
       res.sendStatus(200);
