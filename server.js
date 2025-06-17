@@ -834,6 +834,8 @@ app.post('/payments/webhook', express.raw({ type: 'application/json' }), async (
 
     if (event.event === 'charge.success') {
       // Update order to 'paid'
+      // Debug log for order update
+      console.log('Updating order', { order_id, user_id });
       const { data: updatedOrder, error: updateError } = await supabase
         .from('orders')
         .update({
