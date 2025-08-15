@@ -1,0 +1,15 @@
+name: forge-bolt Cron
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+jobs:
+  ping-watchdog:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Log timestamp
+        run: date
+      - name: Call my Render API
+        run: curl -I https://forge-bolt.onrender.com

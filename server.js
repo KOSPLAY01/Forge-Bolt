@@ -36,11 +36,6 @@ app.get('/', (req, res) => {
   res.send('Welcome to Forge & Bolt');
 });
 
-app.get('/ping', (req, res) => {
-  console.log(`Ping from cron-job.org at ${new Date().toISOString()}`);
-  res.sendStatus(200);
-});
-
 
 // Mount modular routes
 app.use('/', userRoutes);
